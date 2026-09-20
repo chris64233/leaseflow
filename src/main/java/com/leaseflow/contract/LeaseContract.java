@@ -4,6 +4,8 @@ import com.leaseflow.asset.LeasedAsset;
 import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
@@ -48,12 +50,17 @@ public class LeaseContract {
     @Column(name = "term_months", nullable = false)
     private int termMonths;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "repayment_method", nullable = false, length = 32)
+    private RepaymentMethod repaymentMethod;
+
     protected LeaseContract() {
     }
 
     public LeaseContract(String contractNo, LeasedAsset asset, LocalDate startDate,
                          LocalDate firstPaymentDate, BigDecimal financingAmount,
-                         BigDecimal nominalAnnualRate, int termMonths) {
+                         BigDecimal nominalAnnualRate, int termMonths,
+                         RepaymentMethod repaymentMethod) {
         this.contractNo = contractNo;
         this.asset = asset;
         this.startDate = startDate;
@@ -61,6 +68,7 @@ public class LeaseContract {
         this.financingAmount = financingAmount;
         this.nominalAnnualRate = nominalAnnualRate;
         this.termMonths = termMonths;
+        this.repaymentMethod = repaymentMethod;
     }
 
     public Long getId() {
@@ -93,5 +101,9 @@ public class LeaseContract {
 
     public int getTermMonths() {
         return termMonths;
+    }
+
+    public RepaymentMethod getRepaymentMethod() {
+        return repaymentMethod;
     }
 }

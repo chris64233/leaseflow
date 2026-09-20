@@ -58,10 +58,11 @@ public class LeaseService {
                 request.category(), request.originalValue());
         LeaseContract contract = new LeaseContract(request.contractNo(), asset,
                 request.startDate(), request.firstPaymentDate(), request.financingAmount(),
-                request.nominalAnnualRate(), request.termMonths());
+                request.nominalAnnualRate(), request.termMonths(), request.repaymentMethod());
 
         RentSchedule schedule = calculator.calculate(request.financingAmount(),
-                request.nominalAnnualRate(), request.termMonths(), request.firstPaymentDate());
+                request.nominalAnnualRate(), request.termMonths(), request.firstPaymentDate(),
+                request.repaymentMethod());
         List<PaymentScheduleItem> items = schedule.rows().stream()
                 .map(row -> new PaymentScheduleItem(contract, row.periodNo(), row.dueDate(),
                         row.openingPrincipal(), row.principalDue(), row.interestDue(),
@@ -106,7 +107,8 @@ public class LeaseService {
                         asset.getCategory(), asset.getOriginalValue()),
                 new LeaseResponse.ContractView(contract.getContractNo(), contract.getStartDate(),
                         contract.getFirstPaymentDate(), contract.getFinancingAmount(),
-                        contract.getNominalAnnualRate(), contract.getTermMonths()),
+                        contract.getNominalAnnualRate(), contract.getTermMonths(),
+                        contract.getRepaymentMethod()),
                 items.stream()
                         .map(item -> new LeaseResponse.ScheduleItemView(item.getPeriodNo(),
                                 item.getDueDate(), item.getOpeningPrincipal(),

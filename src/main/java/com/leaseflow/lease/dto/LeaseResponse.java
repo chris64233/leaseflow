@@ -1,5 +1,7 @@
 package com.leaseflow.lease.dto;
 
+import com.leaseflow.contract.RepaymentMethod;
+
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
@@ -13,7 +15,8 @@ public record LeaseResponse(AssetView asset, ContractView contract,
 
     public record ContractView(String contractNo, LocalDate startDate,
                                LocalDate firstPaymentDate, BigDecimal financingAmount,
-                               BigDecimal nominalAnnualRate, int termMonths) {
+                               BigDecimal nominalAnnualRate, int termMonths,
+                               RepaymentMethod repaymentMethod) {
     }
 
     public record ScheduleItemView(int periodNo, LocalDate dueDate,

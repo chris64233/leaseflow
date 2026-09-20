@@ -1,5 +1,6 @@
 package com.leaseflow.lease.dto;
 
+import com.leaseflow.contract.RepaymentMethod;
 import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Digits;
@@ -48,6 +49,13 @@ public record CreateLeaseRequest(
         @NotNull(message = "期数不能为空")
         @Min(value = 1, message = "期数不得小于 1")
         @Max(value = 120, message = "期数不得大于 120")
-        Integer termMonths
+        Integer termMonths,
+
+        RepaymentMethod repaymentMethod
 ) {
+    public CreateLeaseRequest {
+        if (repaymentMethod == null) {
+            repaymentMethod = RepaymentMethod.EQUAL_PRINCIPAL;
+        }
+    }
 }
