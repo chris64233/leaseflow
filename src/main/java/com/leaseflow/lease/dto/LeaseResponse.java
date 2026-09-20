@@ -13,7 +13,8 @@ public record LeaseResponse(AssetView asset, ContractView contract,
 
     public record ContractView(String contractNo, LocalDate startDate,
                                LocalDate firstPaymentDate, BigDecimal financingAmount,
-                               BigDecimal nominalAnnualRate, int termMonths) {
+                               BigDecimal nominalAnnualRate, int termMonths,
+                               String repaymentMethod) {
     }
 
     public record ScheduleItemView(int periodNo, LocalDate dueDate,

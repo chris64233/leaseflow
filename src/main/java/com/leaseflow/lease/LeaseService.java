@@ -7,6 +7,7 @@ import com.leaseflow.common.exception.DuplicateResourceException;
 import com.leaseflow.common.exception.ResourceNotFoundException;
 import com.leaseflow.contract.LeaseContract;
 import com.leaseflow.contract.LeaseContractRepository;
+import com.leaseflow.contract.RepaymentMethod;
 import com.leaseflow.lease.dto.CreateLeaseRequest;
 import com.leaseflow.lease.dto.LeaseResponse;
 import com.leaseflow.schedule.PaymentScheduleItem;
@@ -54,14 +55,16 @@ public class LeaseService {
             throw new DuplicateResourceException("合同编号已存在: " + request.contractNo());
         }
 
+        RepaymentMethod repaymentMethod = request.effectiveRepaymentMethod();
         LeasedAsset asset = new LeasedAsset(request.assetCode(), request.assetName(),
                 request.category(), request.originalValue());
         LeaseContract contract = new LeaseContract(request.contractNo(), asset,
                 request.startDate(), request.firstPaymentDate(), request.financingAmount(),
-                request.nominalAnnualRate(), request.termMonths());
+                request.nominalAnnualRate(), request.termMonths(), repaymentMethod);
 
         RentSchedule schedule = calculator.calculate(request.financingAmount(),
-                request.nominalAnnualRate(), request.termMonths(), request.firstPaymentDate());
+                request.nominalAnnualRate(), request.termMonths(), request.firstPaymentDate(),
+                repaymentMethod);
         List<PaymentScheduleItem> items = schedule.rows().stream()
                 .map(row -> new PaymentScheduleItem(contract, row.periodNo(), row.dueDate(),
                         row.openingPrincipal(), row.principalDue(), row.interestDue(),
@@ -106,7 +109,8 @@ public class LeaseService {
                         asset.getCategory(), asset.getOriginalValue()),
                 new LeaseResponse.ContractView(contract.getContractNo(), contract.getStartDate(),
                         contract.getFirstPaymentDate(), contract.getFinancingAmount(),
-                        contract.getNominalAnnualRate(), contract.getTermMonths()),
+                        contract.getNominalAnnualRate(), contract.getTermMonths(),
+                        contract.getRepaymentMethod().name()),
                 items.stream()
                         .map(item -> new LeaseResponse.ScheduleItemView(item.getPeriodNo(),
                                 item.getDueDate(), item.getOpeningPrincipal(),

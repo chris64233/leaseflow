@@ -2,6 +2,7 @@ package com.leaseflow.lease;
 
 import com.leaseflow.asset.LeasedAssetRepository;
 import com.leaseflow.contract.LeaseContractRepository;
+import com.leaseflow.contract.RepaymentMethod;
 import com.leaseflow.schedule.PaymentScheduleItem;
 import com.leaseflow.schedule.PaymentScheduleItemRepository;
 import org.junit.jupiter.api.Test;
@@ -44,6 +45,16 @@ class LeaseApiTests {
     private String requestJson(String assetCode, String contractNo, String originalValue,
                                String financingAmount, String annualRate, int termMonths,
                                String startDate, String firstPaymentDate) {
+        return requestJson(assetCode, contractNo, originalValue, financingAmount, annualRate,
+                termMonths, startDate, firstPaymentDate, null);
+    }
+
+    private String requestJson(String assetCode, String contractNo, String originalValue,
+                               String financingAmount, String annualRate, int termMonths,
+                               String startDate, String firstPaymentDate, String repaymentMethod) {
+        String repaymentMethodLine = repaymentMethod == null
+                ? ""
+                : ",\n  \"repaymentMethod\": \"%s\"".formatted(repaymentMethod);
         return """
                 {
                   "assetCode": "%s",
@@ -55,10 +66,10 @@ class LeaseApiTests {
                   "firstPaymentDate": "%s",
                   "financingAmount": %s,
                   "nominalAnnualRate": %s,
-                  "termMonths": %d
+                  "termMonths": %d%s
                 }
                 """.formatted(assetCode, originalValue, contractNo, startDate,
-                firstPaymentDate, financingAmount, annualRate, termMonths);
+                firstPaymentDate, financingAmount, annualRate, termMonths, repaymentMethodLine);
     }
 
     private JsonNode postLease(String body) throws Exception {
@@ -312,5 +323,181 @@ class LeaseApiTests {
         assertThat(error.get("code").asText()).isEqualTo("RESOURCE_NOT_FOUND");
         assertThat(error.get("message").asText()).contains("NO-SUCH-CONTRACT");
         assertThat(error.get("timestamp").asText()).isNotBlank();
+    }
+
+    @Test
+    void createsEqualPaymentScheduleAndPersists() throws Exception {
+        JsonNode response = postLease(requestJson("ASSET-301", "HT-301", "150000",
+                "120000", "0.12", 12, "2025-01-01", "2025-02-01", "EQUAL_PAYMENT"));
+
+        assertThat(response.get("contract").get("repaymentMethod").asText())
+                .isEqualTo("EQUAL_PAYMENT");
+        assertThat(response.get("schedule").size()).isEqualTo(12);
+
+        // 标准年金公式月供：120000 × 1% × 1.01^12 / (1.01^12 - 1) = 10661.85
+        JsonNode first = response.get("schedule").get(0);
+        assertMoney(first, "openingPrincipal", "120000.00");
+        assertMoney(first, "interestDue", "1200.00");
+        assertMoney(first, "principalDue", "9461.85");
+        assertMoney(first, "totalDue", "10661.85");
+        assertMoney(first, "closingPrincipal", "110538.15");
+
+        // 最后一期以剩余本金 + 当期利息吸收累计舍入差额
+        JsonNode last = response.get("schedule").get(11);
+        assertMoney(last, "openingPrincipal", "10556.35");
+        assertMoney(last, "principalDue", "10556.35");
+        assertMoney(last, "interestDue", "105.56");
+        assertMoney(last, "totalDue", "10661.91");
+        assertMoney(last, "closingPrincipal", "0.00");
+
+        assertMoney(response.get("summary"), "totalPrincipal", "120000.00");
+        assertMoney(response.get("summary"), "totalInterest", "7942.26");
+        assertMoney(response.get("summary"), "totalAmount", "127942.26");
+
+        // 汇总与明细一致，本金合计等于融资金额，金额均非负
+        BigDecimal sumPrincipal = BigDecimal.ZERO;
+        BigDecimal sumInterest = BigDecimal.ZERO;
+        BigDecimal sumTotal = BigDecimal.ZERO;
+        for (JsonNode item : response.get("schedule")) {
+            sumPrincipal = sumPrincipal.add(item.get("principalDue").decimalValue());
+            sumInterest = sumInterest.add(item.get("interestDue").decimalValue());
+            sumTotal = sumTotal.add(item.get("totalDue").decimalValue());
+            assertThat(item.get("principalDue").decimalValue()).isGreaterThanOrEqualTo(BigDecimal.ZERO);
+            assertThat(item.get("interestDue").decimalValue()).isGreaterThanOrEqualTo(BigDecimal.ZERO);
+            assertThat(item.get("totalDue").decimalValue()).isGreaterThanOrEqualTo(BigDecimal.ZERO);
+        }
+        assertThat(sumPrincipal).isEqualByComparingTo("120000.00");
+        assertThat(sumInterest).isEqualByComparingTo("7942.26");
+        assertThat(sumTotal).isEqualByComparingTo("127942.26");
+
+        // 还款方式持久化验证
+        var contract = contractRepository.findByContractNo("HT-301").orElseThrow();
+        assertThat(contract.getRepaymentMethod()).isEqualTo(RepaymentMethod.EQUAL_PAYMENT);
+        List<PaymentScheduleItem> persisted = scheduleItemRepository
+                .findByContractIdOrderByPeriodNoAsc(contract.getId());
+        assertThat(persisted).hasSize(12);
+        assertThat(persisted.get(0).getTotalDue()).isEqualByComparingTo("10661.85");
+        assertThat(persisted.get(11).getClosingPrincipal()).isEqualByComparingTo("0.00");
+
+        // 查询接口返回与创建一致的计划、汇总及还款方式
+        MvcResult getResult = mockMvc.perform(get("/api/leases/HT-301"))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode detail = objectMapper.readTree(getResult.getResponse().getContentAsString());
+        assertThat(detail.get("contract").get("repaymentMethod").asText())
+                .isEqualTo("EQUAL_PAYMENT");
+        assertThat(detail.get("schedule").size()).isEqualTo(12);
+        assertMoney(detail.get("schedule").get(0), "totalDue", "10661.85");
+        assertMoney(detail.get("schedule").get(11), "totalDue", "10661.91");
+        assertMoney(detail.get("summary"), "totalPrincipal", "120000.00");
+        assertMoney(detail.get("summary"), "totalInterest", "7942.26");
+        assertMoney(detail.get("summary"), "totalAmount", "127942.26");
+    }
+
+    @Test
+    void createsEqualPaymentZeroRateSchedule() throws Exception {
+        JsonNode response = postLease(requestJson("ASSET-302", "HT-302", "8000",
+                "6000", "0", 6, "2025-03-01", "2025-04-01", "EQUAL_PAYMENT"));
+
+        assertThat(response.get("contract").get("repaymentMethod").asText())
+                .isEqualTo("EQUAL_PAYMENT");
+        assertThat(response.get("schedule").size()).isEqualTo(6);
+        for (JsonNode item : response.get("schedule")) {
+            assertMoney(item, "interestDue", "0.00");
+            assertMoney(item, "principalDue", "1000.00");
+            assertMoney(item, "totalDue", "1000.00");
+        }
+        assertMoney(response.get("schedule").get(5), "closingPrincipal", "0.00");
+        assertMoney(response.get("summary"), "totalPrincipal", "6000.00");
+        assertMoney(response.get("summary"), "totalInterest", "0.00");
+        assertMoney(response.get("summary"), "totalAmount", "6000.00");
+    }
+
+    @Test
+    void createsEqualPaymentSinglePeriodSchedule() throws Exception {
+        JsonNode response = postLease(requestJson("ASSET-303", "HT-303", "6000",
+                "5000", "0.06", 1, "2025-01-15", "2025-02-15", "EQUAL_PAYMENT"));
+
+        assertThat(response.get("schedule").size()).isEqualTo(1);
+        JsonNode only = response.get("schedule").get(0);
+        assertMoney(only, "openingPrincipal", "5000.00");
+        assertMoney(only, "principalDue", "5000.00");
+        assertMoney(only, "interestDue", "25.00");
+        assertMoney(only, "totalDue", "5025.00");
+        assertMoney(only, "closingPrincipal", "0.00");
+        assertMoney(response.get("summary"), "totalPrincipal", "5000.00");
+        assertMoney(response.get("summary"), "totalInterest", "25.00");
+        assertMoney(response.get("summary"), "totalAmount", "5025.00");
+    }
+
+    @Test
+    void equalPaymentLastPeriodAbsorbsRoundingDifference() throws Exception {
+        JsonNode response = postLease(requestJson("ASSET-304", "HT-304", "10000",
+                "10000", "0.1", 3, "2025-01-01", "2025-02-01", "EQUAL_PAYMENT"));
+
+        JsonNode schedule = response.get("schedule");
+        // 月供 3389.04，最后一期应还总额 3389.05 吸收累计舍入差额
+        assertMoney(schedule.get(0), "totalDue", "3389.04");
+        assertMoney(schedule.get(1), "totalDue", "3389.04");
+        assertMoney(schedule.get(2), "principalDue", "3361.04");
+        assertMoney(schedule.get(2), "interestDue", "28.01");
+        assertMoney(schedule.get(2), "totalDue", "3389.05");
+        assertMoney(schedule.get(2), "closingPrincipal", "0.00");
+
+        BigDecimal sumPrincipal = BigDecimal.ZERO;
+        for (JsonNode item : schedule) {
+            assertThat(item.get("principalDue").decimalValue()).isGreaterThanOrEqualTo(BigDecimal.ZERO);
+            assertThat(item.get("interestDue").decimalValue()).isGreaterThanOrEqualTo(BigDecimal.ZERO);
+            sumPrincipal = sumPrincipal.add(item.get("principalDue").decimalValue());
+        }
+        assertThat(sumPrincipal).isEqualByComparingTo("10000.00");
+        assertMoney(response.get("summary"), "totalPrincipal", "10000.00");
+        assertMoney(response.get("summary"), "totalInterest", "167.13");
+        assertMoney(response.get("summary"), "totalAmount", "10167.13");
+    }
+
+    @Test
+    void defaultsToEqualPrincipalWhenRepaymentMethodOmitted() throws Exception {
+        JsonNode response = postLease(requestJson("ASSET-305", "HT-305", "10000",
+                "8000", "0.1", 4, "2025-01-01", "2025-02-01"));
+
+        assertThat(response.get("contract").get("repaymentMethod").asText())
+                .isEqualTo("EQUAL_PRINCIPAL");
+        // 等额本金：每月本金 2000.00，首期利息 66.67
+        JsonNode first = response.get("schedule").get(0);
+        assertMoney(first, "principalDue", "2000.00");
+        assertMoney(first, "interestDue", "66.67");
+        assertMoney(first, "totalDue", "2066.67");
+
+        var contract = contractRepository.findByContractNo("HT-305").orElseThrow();
+        assertThat(contract.getRepaymentMethod()).isEqualTo(RepaymentMethod.EQUAL_PRINCIPAL);
+
+        MvcResult getResult = mockMvc.perform(get("/api/leases/HT-305"))
+                .andExpect(status().isOk())
+                .andReturn();
+        JsonNode detail = objectMapper.readTree(getResult.getResponse().getContentAsString());
+        assertThat(detail.get("contract").get("repaymentMethod").asText())
+                .isEqualTo("EQUAL_PRINCIPAL");
+    }
+
+    @Test
+    void rejectsInvalidRepaymentMethod() throws Exception {
+        MvcResult result = mockMvc.perform(post("/api/leases")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(requestJson("ASSET-306", "HT-306", "10000",
+                                "8000", "0.1", 12, "2025-01-01", "2025-02-01", "MONTHLY")))
+                .andExpect(status().isBadRequest())
+                .andReturn();
+        JsonNode error = objectMapper.readTree(result.getResponse().getContentAsString());
+        assertThat(error.get("code").asText()).isEqualTo("VALIDATION_FAILED");
+        assertThat(error.get("timestamp").asText()).isNotBlank();
+        assertThat(error.get("errors").size()).isEqualTo(1);
+        JsonNode fieldError = error.get("errors").get(0);
+        assertThat(fieldError.get("field").asText()).isEqualTo("repaymentMethod");
+        assertThat(fieldError.get("reason").asText())
+                .contains("MONTHLY")
+                .contains("EQUAL_PRINCIPAL")
+                .contains("EQUAL_PAYMENT");
+        assertThat(contractRepository.findByContractNo("HT-306")).isEmpty();
     }
 }
