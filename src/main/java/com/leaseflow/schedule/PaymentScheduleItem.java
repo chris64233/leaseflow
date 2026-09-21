@@ -47,6 +47,9 @@ public class PaymentScheduleItem {
     @Column(name = "closing_principal", nullable = false, precision = 19, scale = 2)
     private BigDecimal closingPrincipal;
 
+    @Column(name = "paid_amount", nullable = false, precision = 19, scale = 2)
+    private BigDecimal paidAmount = BigDecimal.ZERO.setScale(2);
+
     protected PaymentScheduleItem() {
     }
 
@@ -98,5 +101,13 @@ public class PaymentScheduleItem {
 
     public BigDecimal getClosingPrincipal() {
         return closingPrincipal;
+    }
+
+    public BigDecimal getPaidAmount() {
+        return paidAmount;
+    }
+
+    public void addPaidAmount(BigDecimal amount) {
+        this.paidAmount = this.paidAmount.add(amount);
     }
 }

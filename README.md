@@ -1,6 +1,6 @@
 # LeaseFlow
 
-LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，并按等额本金或等额本息方式生成月度租金计划。
+LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，按等额本金或等额本息方式生成月度租金计划，并支持按合同、期次登记租金回款。
 
 ## 环境
 
@@ -43,6 +43,45 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 
 返回租赁项目详情（含持久化的 `repaymentMethod`）及按期次升序排列的租金计划，计划与汇总与创建结果一致；合同不存在返回 `404`。
 
+每期计划除原有金额字段外，还包含：
+
+- `paidAmount`：该期累计已收金额；
+- `outstandingAmount`：该期未收金额（应还总额 − 已收金额）；
+- `paymentStatus`：回款状态，`UNPAID`（无回款）、`PARTIAL`（已收小于应还）或 `PAID`（已收等于应还）。
+
+汇总在原有本金、利息、租金合计之外，增加 `totalPaid`（累计已收合计）与 `totalOutstanding`（未收合计）。原有计划金额（期初本金、应还本金、应还利息、应还总额、期末本金）及 `repaymentMethod` 保持不变。
+
+### 登记租金回款
+
+`POST /api/leases/{contractNo}/schedule/{periodNo}/payments`
+
+按合同编号和租金期次登记一笔回款，请求体：
+
+```json
+{
+  "paymentNo": "PAY-20250205-001",
+  "amount": 5000.00,
+  "paymentDate": "2025-02-05"
+}
+```
+
+- `paymentNo`：全局唯一的回款流水号；
+- `amount`：回款金额，必须大于 0，最多保留 2 位小数，且与该期历史回款累计后不得超过该期应还总额；
+- `paymentDate`：回款日期。
+
+成功返回 `201`，响应包含回款信息（`payment`：流水号、期次、金额、日期）以及该期结果（`period`：期次、`totalDue` 应还总额、`paidAmount` 累计已收、`outstandingAmount` 未收金额、`paymentStatus` 回款状态）。
+
+同一期支持分多次回款：累计已收小于应还总额时为 `PARTIAL`，等于应还总额时为 `PAID`，没有回款时为 `UNPAID`。
+
+错误情况：
+
+- 合同不存在，或该合同下期次不存在，返回 `404`；
+- 回款流水号重复（即使发生在不同合同或不同期次之间）返回 `409`；
+- 回款金额小于等于 0、格式非法，或导致累计回款超过该期应还总额，返回 `400`；
+- 所有错误均沿用统一错误响应结构。
+
+回款记录与租金期次已收金额在同一数据库事务内持久化；登记失败（含流水号冲突、超额回款等）时整笔事务回滚，不留下回款记录，也不改变已收金额。
+
 ### 校验与错误响应
 
 - 租赁物编码、合同编号分别唯一，重复返回 `409`。
@@ -58,6 +97,8 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 - 所有金额与利率计算均使用 `BigDecimal`，不使用 `double`/`float`。
 - 租赁物、合同、租金计划通过 JPA 在同一事务中持久化，数据库层设有唯一约束，失败时不留部分数据。
 - 合同持久化实际采用的还款方式（`repayment_method` 列，枚举字符串）。
+- 租金期次持久化累计已收金额（`paid_amount` 列，初始为 0）；回款记录独立持久化（`rent_payment` 表），流水号 `payment_no` 全局唯一，登记回款时对目标期次加行级悲观锁并在同一事务内写入回款记录、累加已收金额。
+- 回款状态不落库，按 `total_due` 与 `paid_amount` 实时推导：已收为 0 → `UNPAID`，已收小于应还 → `PARTIAL`，已收等于应还 → `PAID`。
 
 ### 等额本金（EQUAL_PRINCIPAL，默认）
 
@@ -87,3 +128,9 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
       -d '{"assetCode":"ASSET-001","assetName":"数控机床","category":"生产设备","originalValue":150000.00,"contractNo":"HT-001","startDate":"2025-01-01","firstPaymentDate":"2025-02-01","financingAmount":120000.00,"nominalAnnualRate":0.12,"termMonths":12}'
 
     curl http://localhost:8080/api/leases/HT-001
+
+登记第 1 期回款：
+
+    curl -X POST http://localhost:8080/api/leases/HT-001/schedule/1/payments \
+      -H "Content-Type: application/json" \
+      -d '{"paymentNo":"PAY-20250205-001","amount":5000.00,"paymentDate":"2025-02-05"}'

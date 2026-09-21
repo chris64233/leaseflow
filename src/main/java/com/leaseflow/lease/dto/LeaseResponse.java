@@ -20,10 +20,12 @@ public record LeaseResponse(AssetView asset, ContractView contract,
     public record ScheduleItemView(int periodNo, LocalDate dueDate,
                                    BigDecimal openingPrincipal, BigDecimal principalDue,
                                    BigDecimal interestDue, BigDecimal totalDue,
-                                   BigDecimal closingPrincipal) {
+                                   BigDecimal closingPrincipal, BigDecimal paidAmount,
+                                   BigDecimal outstandingAmount, String paymentStatus) {
     }
 
     public record SummaryView(BigDecimal totalPrincipal, BigDecimal totalInterest,
-                              BigDecimal totalAmount) {
+                              BigDecimal totalAmount, BigDecimal totalPaid,
+                              BigDecimal totalOutstanding) {
     }
 }

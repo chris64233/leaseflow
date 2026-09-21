@@ -10,6 +10,7 @@ import com.leaseflow.contract.LeaseContractRepository;
 import com.leaseflow.contract.RepaymentMethod;
 import com.leaseflow.lease.dto.CreateLeaseRequest;
 import com.leaseflow.lease.dto.LeaseResponse;
+import com.leaseflow.payment.PaymentStatus;
 import com.leaseflow.schedule.PaymentScheduleItem;
 import com.leaseflow.schedule.PaymentScheduleItemRepository;
 import com.leaseflow.schedule.RentScheduleCalculator;
@@ -112,12 +113,23 @@ public class LeaseService {
                         contract.getNominalAnnualRate(), contract.getTermMonths(),
                         contract.getRepaymentMethod().name()),
                 items.stream()
-                        .map(item -> new LeaseResponse.ScheduleItemView(item.getPeriodNo(),
+                        .map(item -> {
+                            BigDecimal outstanding = item.getTotalDue().subtract(item.getPaidAmount());
+                            PaymentStatus status = PaymentStatus.of(item.getTotalDue(),
+                                    item.getPaidAmount());
+                            return new LeaseResponse.ScheduleItemView(item.getPeriodNo(),
                                 item.getDueDate(), item.getOpeningPrincipal(),
                                 item.getPrincipalDue(), item.getInterestDue(),
-                                item.getTotalDue(), item.getClosingPrincipal()))
+                                item.getTotalDue(), item.getClosingPrincipal(),
+                                item.getPaidAmount(), outstanding, status.name());
+                        })
                         .toList(),
                 new LeaseResponse.SummaryView(summary.totalPrincipal(),
-                        summary.totalInterest(), summary.totalAmount()));
+                        summary.totalInterest(), summary.totalAmount(),
+                        items.stream().map(PaymentScheduleItem::getPaidAmount)
+                                .reduce(BigDecimal.ZERO, BigDecimal::add),
+                        items.stream()
+                                .map(item -> item.getTotalDue().subtract(item.getPaidAmount()))
+                                .reduce(BigDecimal.ZERO, BigDecimal::add)));
     }
 }
