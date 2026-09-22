@@ -10,7 +10,9 @@ import tools.jackson.databind.exc.InvalidFormatException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
+import java.util.Arrays;
 import java.util.List;
 
 @RestControllerAdvice
@@ -42,6 +44,21 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleNotFound(ResourceNotFoundException ex) {
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
                 .body(new ErrorResponse("RESOURCE_NOT_FOUND", ex.getMessage()));
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleTypeMismatch(
+            MethodArgumentTypeMismatchException ex) {
+        String reason = "非法取值: " + ex.getValue();
+        Class<?> requiredType = ex.getRequiredType();
+        if (requiredType != null && requiredType.isEnum()) {
+            reason += "，允许值: " + String.join(", ", Arrays.stream(requiredType.getEnumConstants())
+                    .map(constant -> ((Enum<?>) constant).name())
+                    .toList());
+        }
+        return ResponseEntity.badRequest()
+                .body(new ErrorResponse("VALIDATION_FAILED", "请求参数校验失败",
+                        List.of(new ErrorResponse.FieldError(ex.getName(), reason))));
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
