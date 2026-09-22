@@ -10,6 +10,8 @@ import tools.jackson.databind.exc.InvalidFormatException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.util.List;
 
@@ -57,6 +59,27 @@ public class GlobalExceptionHandler {
         }
         return ResponseEntity.badRequest()
                 .body(new ErrorResponse("BAD_REQUEST", "请求体格式错误"));
+    }
+
+    @ExceptionHandler(MissingServletRequestParameterException.class)
+    public ResponseEntity<ErrorResponse> handleMissingParameter(
+            MissingServletRequestParameterException ex) {
+        return ResponseEntity.badRequest()
+                .body(new ErrorResponse("VALIDATION_FAILED", "请求参数校验失败",
+                        List.of(new ErrorResponse.FieldError(ex.getParameterName(),
+                                "缺少必填参数"))));
+    }
+
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleTypeMismatch(
+            MethodArgumentTypeMismatchException ex) {
+        String reason = "参数格式错误";
+        if (ex.getRequiredType() == java.time.LocalDate.class) {
+            reason = "日期格式错误，应为 yyyy-MM-dd";
+        }
+        return ResponseEntity.badRequest()
+                .body(new ErrorResponse("VALIDATION_FAILED", "请求参数校验失败",
+                        List.of(new ErrorResponse.FieldError(ex.getName(), reason))));
     }
 
     private static <T extends Throwable> T findCause(Throwable ex, Class<T> type) {

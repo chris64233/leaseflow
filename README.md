@@ -1,6 +1,6 @@
 # LeaseFlow
 
-LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，按等额本金或等额本息方式生成月度租金计划，并支持按合同、期次登记租金回款。
+LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，按等额本金或等额本息方式生成月度租金计划，按合同、期次登记租金回款，并支持按业务日期扫描逾期租金、生成与管理催收任务。
 
 ## 环境
 
@@ -82,6 +82,63 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 
 回款记录与租金期次已收金额在同一数据库事务内持久化；登记失败（含流水号冲突、超额回款等）时整笔事务回滚，不留下回款记录，也不改变已收金额。
 
+### 逾期扫描
+
+`POST /api/collection-tasks/scan?businessDate=2025-04-10`
+
+按业务日期执行一次全量逾期扫描：
+
+- 租金期次到期日严格早于业务日期（到期日当天不算逾期）且仍有未收金额（应还总额 − 累计已收 > 0）时，为该合同期次生成一条催收任务；
+- 每个合同期次最多一条催收任务。重复扫描或并发扫描不会产生重复数据，再次扫描会按业务日期刷新逾期天数、按最新回款情况刷新未收金额；
+- 部分回款后按剩余未收金额催收；
+- 已有 OPEN 任务的期次足额回款后，下一次扫描将任务置为 `CLOSED`（已足额回款的期次不会新生成任务，CLOSED 任务保持不变）；
+- 逾期天数 = 业务日期 − 到期日的自然日差。
+
+成功返回 `200`：
+
+```json
+{
+  "businessDate": "2025-04-10",
+  "createdCount": 2,
+  "updatedCount": 1,
+  "closedCount": 1
+}
+```
+
+计数口径：
+
+- `createdCount`：本次扫描新生成的催收任务数；
+- `updatedCount`：本次扫描中逾期天数或未收金额实际发生变化的已存在 OPEN 任务数（同一业务日期重复扫描为 0）；
+- `closedCount`：本次扫描由 OPEN 变为 CLOSED 的任务数。
+
+扫描对全部到期期次加行级悲观锁并按期次主键升序处理，扫描结果与任务变更在同一数据库事务内持久化；扫描失败时整笔事务回滚，不留下部分任务数据。
+
+缺少 `businessDate` 或日期格式不是 `yyyy-MM-dd` 时返回 `400`。
+
+### 查询催收任务
+
+`GET /api/collection-tasks`
+
+可选查询参数：
+
+- `contractNo`：按合同编号精确筛选；
+- `status`：按状态筛选，取值 `OPEN`、`CLOSED`，其他值返回 `400`。
+
+两个参数可任意组合（均不传则返回全部任务）。结果按到期日、合同编号、租金期次升序稳定排序。每条任务包含合同编号、租金期次、到期日、逾期天数、未收金额和状态：
+
+```json
+[
+  {
+    "contractNo": "HT-001",
+    "periodNo": 1,
+    "dueDate": "2025-02-01",
+    "overdueDays": 68,
+    "outstandingAmount": 6200.00,
+    "status": "OPEN"
+  }
+]
+```
+
 ### 校验与错误响应
 
 - 租赁物编码、合同编号分别唯一，重复返回 `409`。
@@ -99,6 +156,8 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 - 合同持久化实际采用的还款方式（`repayment_method` 列，枚举字符串）。
 - 租金期次持久化累计已收金额（`paid_amount` 列，初始为 0）；回款记录独立持久化（`rent_payment` 表），流水号 `payment_no` 全局唯一，登记回款时对目标期次加行级悲观锁并在同一事务内写入回款记录、累加已收金额。
 - 回款状态不落库，按 `total_due` 与 `paid_amount` 实时推导：已收为 0 → `UNPAID`，已收小于应还 → `PARTIAL`，已收等于应还 → `PAID`。
+- 催收任务持久化在 `collection_task` 表，通过 `schedule_item_id` 外键唯一约束保证每个合同期次最多一条任务；冗余存储合同编号、期次、到期日以支持稳定查询排序。任务状态为 `OPEN` / `CLOSED`（枚举字符串落库）。
+- 逾期扫描对全部到期期次加行级悲观写锁并按期次主键升序处理，串行化重复与并发扫描，配合期次唯一约束杜绝重复任务；任务新增、刷新、关闭与计数在同一事务内完成，失败整体回滚。
 
 ### 等额本金（EQUAL_PRINCIPAL，默认）
 
@@ -134,3 +193,11 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
     curl -X POST http://localhost:8080/api/leases/HT-001/schedule/1/payments \
       -H "Content-Type: application/json" \
       -d '{"paymentNo":"PAY-20250205-001","amount":5000.00,"paymentDate":"2025-02-05"}'
+
+按业务日期执行逾期扫描：
+
+    curl -X POST "http://localhost:8080/api/collection-tasks/scan?businessDate=2025-04-10"
+
+查询催收任务（可按合同编号、状态筛选）：
+
+    curl "http://localhost:8080/api/collection-tasks?contractNo=HT-001&status=OPEN"
