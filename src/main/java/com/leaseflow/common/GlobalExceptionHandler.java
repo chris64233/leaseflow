@@ -3,6 +3,7 @@ package com.leaseflow.common;
 import com.leaseflow.common.exception.BusinessRuleViolationException;
 import com.leaseflow.common.exception.DuplicateResourceException;
 import com.leaseflow.common.exception.ResourceNotFoundException;
+import com.leaseflow.common.exception.VersionConflictException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
@@ -38,6 +39,12 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleDuplicate(DuplicateResourceException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(new ErrorResponse("DUPLICATE_RESOURCE", ex.getMessage()));
+    }
+
+    @ExceptionHandler(VersionConflictException.class)
+    public ResponseEntity<ErrorResponse> handleVersionConflict(VersionConflictException ex) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ErrorResponse("VERSION_CONFLICT", ex.getMessage()));
     }
 
     @ExceptionHandler(ResourceNotFoundException.class)

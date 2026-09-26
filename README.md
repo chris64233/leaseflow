@@ -1,6 +1,6 @@
 # LeaseFlow
 
-LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，按等额本金或等额本息方式生成月度租金计划，按合同、期次登记租金回款，并支持按业务日期扫描逾期租金、生成和管理催收任务。
+LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，按等额本金或等额本息方式生成月度租金计划，按合同、期次登记租金回款，并支持按业务日期扫描逾期租金、生成和管理催收任务；此外为每项租赁物维护不可变的残值评估版本链，支持评估登记（乐观版本控制）、评估历史与当前版本查询。
 
 ## 环境
 
@@ -125,9 +125,62 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 
 两个参数可任意组合；不传则返回全部催收任务。结果始终按到期日、合同编号、期次升序稳定排序。无匹配时返回空数组。
 
+### 登记租赁物残值评估
+
+`POST /api/assets/{assetCode}/valuations`
+
+为指定租赁物在其不可变的评估版本链上追加一个新版本，请求体：
+
+```json
+{
+  "valuationNo": "VAL-20250301-001",
+  "expectedVersion": 0,
+  "valuationDate": "2025-03-01",
+  "residualValue": 120000.00,
+  "institution": "中评评估机构"
+}
+```
+
+- `valuationNo`：全局唯一的评估编号；
+- `expectedVersion`：客户端看到的最新版本号，首次评估传 `0`，之后从历史/当前版本查询结果取得；
+- `valuationDate`：评估日期，不得早于合同起租日，且必须严格晚于该资产当前最新评估日期；
+- `residualValue`：评估价值，必须大于等于 0 且不超过资产原值，最多保留 2 位小数；
+- `institution`：评估机构。
+
+成功追加返回 `201`，响应为新版本视图：`valuationNo`、`assetCode`、`versionNo`（从 1 起连续递增）、`valuationDate`、`residualValue`、`impairmentAmount`（减值金额 = 资产原值 − 评估价值）、`residualRate`（残值率 = 评估价值 ÷ 资产原值）、`institution`、`latest`（是否最新版本，追加成功时为 `true`）。
+
+版本链规则：
+
+- 登记采用乐观版本控制：只有 `expectedVersion` 等于服务端当前最新版本号时才能追加；版本不匹配（过期或跳号）返回 `409`（错误码 `VERSION_CONFLICT`），客户端需重新查询最新版本后再提交；
+- 评估日期必须**严格晚于**当前最新评估日期（同日或更早返回 `409`），因此版本链同时按版本号和评估日期单调递增；
+- 历史版本不可变，不提供任何覆盖或删除入口。
+
+编号唯一与幂等：
+
+- `valuationNo` 全局唯一（数据库唯一约束 `uk_asset_valuation_no`）；
+- 相同编号连同相同资产、日期、价值、机构重复提交时视为重试，幂等返回**首次登记结果**（HTTP `200`，版本号与首次一致），不产生新版本；
+- 编号复用但任一内容（资产、日期、价值、机构）不一致时返回 `409`（错误码 `DUPLICATE_RESOURCE`）。
+
+并发控制：登记事务先对租赁物行加悲观写锁（`SELECT … FOR UPDATE`）串行化同一资产的并发请求，再读取最新版本执行版本匹配与日期校验；配合 `(asset_id, version_no)` 唯一约束兜底，保证同一资产的并发评估只有一个基于当前版本的请求成功，其余得到 `409`。任何校验或写入失败时整笔事务回滚，版本号由“当前版本 + 1”在事务内分配，不留下跳号版本或不完整记录。
+
+错误情况：资产不存在返回 `404`；评估日期早于起租日、评估价值超出 0 到原值范围等业务校验失败返回 `400`；字段格式校验失败返回 `400` 并在 `errors` 中列出字段原因。
+
+### 查询资产评估历史
+
+`GET /api/assets/{assetCode}/valuations`
+
+返回 `assetCode`、`latestVersion`（当前最新版本号，无评估时为 `0`）与 `valuations` 版本列表。列表按版本号升序稳定排列，每个版本均带 `latest` 标记，仅最新版本为 `true`。资产不存在返回 `404`；资产存在但尚无评估时返回 `200` 与空数组。
+
+### 查询当前评估版本
+
+`GET /api/assets/{assetCode}/valuations/current`
+
+返回最新版本视图（`latest` 恒为 `true`）。资产不存在返回 `404`；资产存在但尚无评估返回 `404`。
+
 ### 校验与错误响应
 
 - 租赁物编码、合同编号分别唯一，重复返回 `409`。
+- 残值评估编号全局唯一，复用且内容不一致返回 `409`；登记所基于的版本过期或评估日期不晚于最新版本返回 `409`（错误码 `VERSION_CONFLICT`）。
 - 原值、融资金额必须大于 0，且融资金额不得超过原值；名义年利率取值 0 到 1（允许为 0）；期数 1 到 120；首期应还日不得早于起租日。参数或业务校验失败返回 `400`。
 - 错误响应统一结构：`code`（错误码）、`message`（消息）、`timestamp`（时间），字段校验失败时附带 `errors`（字段及原因）列表。
 
@@ -162,6 +215,16 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 - 每期应还本金 = 月供 − 当期利息；最后一期以剩余本金作为应还本金、本金加当期利息作为应还总额，用于吸收累计舍入差额。
 - 计划保证：本金合计严格等于融资金额、最后一期期末本金为 0、汇总与明细求和一致、所有金额非负。
 
+## 残值评估版本链规则
+
+- 评估记录持久化在 `asset_valuation` 表：外键 `asset_id` 指向租赁物；`valuation_no` 全局唯一（`uk_asset_valuation_no`），`(asset_id, version_no)` 设有联合唯一约束（`uk_asset_valuation_asset_version`）；版本链只增不改，无更新与删除路径。
+- `version_no` 由服务端在登记事务内按“该资产当前最大版本号 + 1”分配，从 1 起连续递增；登记失败整体回滚，因此不会出现跳号版本或不完整记录。
+- 减值金额 = 资产原值 − 评估价值，保留 **2 位小数（HALF_UP）**；残值率 = 评估价值 ÷ 资产原值，保留 **6 位小数（HALF_UP）**；评估价值入库存量到 2 位小数。全部金额与比率使用 `BigDecimal`，不使用 `double`/`float`。
+- 登记事务先对 `leased_asset` 资产行加悲观写锁（`SELECT … FOR UPDATE`），在锁内读取最新版本并完成版本匹配（`expectedVersion`）、评估日期严格递增校验后写入；联合唯一约束兜底，保证同一资产并发登记只有一个基于当前版本的请求成功，其余返回 `409`。
+- 相同编号、相同资产、日期、价值、机构的重复提交命中幂等分支，返回首次结果；编号复用但内容不一致返回 `409`。
+- 历史查询按版本号升序（同级按 id 升序）稳定排序，每条记录标注 `latest`；当前版本即版本号最大的记录。
+- 业务校验：评估日期不得早于合同起租日；评估价值取值区间为 [0, 资产原值]，边界 0 与原值均合法（分别对应残值率 0 与 1）。
+
 ## 常用命令
 
 运行测试：
@@ -195,3 +258,21 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 查询催收任务（可按合同编号、状态筛选）：
 
     curl "http://localhost:8080/api/collection-tasks?contractNo=HT-001&status=OPEN"
+
+登记首次残值评估（基于版本 0）：
+
+    curl -X POST http://localhost:8080/api/assets/ASSET-001/valuations \
+      -H "Content-Type: application/json" \
+      -d '{"valuationNo":"VAL-20250301-001","expectedVersion":0,"valuationDate":"2025-03-01","residualValue":120000.00,"institution":"中评评估机构"}'
+
+基于最新版本 1 追加下一次评估：
+
+    curl -X POST http://localhost:8080/api/assets/ASSET-001/valuations \
+      -H "Content-Type: application/json" \
+      -d '{"valuationNo":"VAL-20250601-001","expectedVersion":1,"valuationDate":"2025-06-01","residualValue":90000.00,"institution":"中评评估机构"}'
+
+查询评估历史与当前版本：
+
+    curl http://localhost:8080/api/assets/ASSET-001/valuations
+
+    curl http://localhost:8080/api/assets/ASSET-001/valuations/current
