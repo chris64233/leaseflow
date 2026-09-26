@@ -9,4 +9,6 @@ public interface LeaseContractRepository extends JpaRepository<LeaseContract, Lo
     boolean existsByContractNo(String contractNo);
 
     Optional<LeaseContract> findByContractNo(String contractNo);
+
+    Optional<LeaseContract> findByAssetId(Long assetId);
 }

@@ -1,6 +1,6 @@
 # LeaseFlow
 
-LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，按等额本金或等额本息方式生成月度租金计划，按合同、期次登记租金回款，并支持按业务日期扫描逾期租金、生成和管理催收任务。
+LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，按等额本金或等额本息方式生成月度租金计划，按合同、期次登记租金回款，支持按业务日期扫描逾期租金、生成和管理催收任务，并为租赁物维护版本化的残值评估记录。
 
 ## 环境
 
@@ -125,6 +125,52 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 
 两个参数可任意组合；不传则返回全部催收任务。结果始终按到期日、合同编号、期次升序稳定排序。无匹配时返回空数组。
 
+### 登记残值评估
+
+`POST /api/assets/{assetCode}/assessments`
+
+为租赁物追加一条残值评估版本，请求体：
+
+```json
+{
+  "assessmentNo": "EV-20250601-001",
+  "assessmentDate": "2025-06-01",
+  "assessedValue": 120000.00,
+  "appraiser": "中联评估",
+  "baseVersion": 0
+}
+```
+
+- `assessmentNo`：全局唯一的评估编号；
+- `assessmentDate`：评估日期，不得早于合同起租日，且必须晚于该租赁物当前最新评估记录的日期；
+- `assessedValue`：评估价值，必须处于 0 到资产原值之间（含边界），最多保留 2 位小数；
+- `appraiser`：评估机构；
+- `baseVersion`：客户端看到的当前最新版本号（无任何评估记录时为 0）。
+
+每项租赁物维护一条不可变的评估版本链：版本号从 1 开始按资产严格递增，历史版本一旦写入不得覆盖或删除。仅当 `baseVersion` 与当前最新版本一致且评估日期晚于最新记录时才追加成功，新版本号 = 当前版本 + 1。
+
+成功返回 `201`，响应包含 `assessmentNo`、`assetCode`、`version`、`assessmentDate`、`assessedValue`、`appraiser`、`impairmentAmount`（减值金额 = 资产原值 − 评估价值，2 位小数 HALF_UP）、`residualRate`（残值率 = 评估价值 ÷ 资产原值，4 位小数 HALF_UP）及 `latest`（是否为最新版本）。
+
+幂等与冲突：
+
+- 相同 `assessmentNo` 且资产、日期、价值、机构完全一致的重复提交返回 `200` 及首次登记结果，不新增版本；
+- `assessmentNo` 复用但内容不一致（含用于其他资产）返回 `409`（`DUPLICATE_RESOURCE`）；
+- `baseVersion` 与当前最新版本不一致（过期或超前）返回 `409`（`VERSION_CONFLICT`）；
+- 评估日期早于起租日、不晚于最新评估日期，或评估价值超出 0 到原值范围，返回 `400`；
+- 租赁物不存在返回 `404`。
+
+同一租赁物的并发登记通过对租赁物行加悲观写锁串行化，配合 `residual_assessment` 表 `(asset_id, version)` 与 `assessment_no` 唯一约束兜底，保证基于同一当前版本的并发请求只接受一个。登记在单一事务内完成，失败时整体回滚，不留下跳号版本或不完整记录。
+
+### 查询评估历史与当前版本
+
+`GET /api/assets/{assetCode}/assessments`
+
+返回该租赁物的全部评估版本，按版本号升序稳定排序，每条记录带 `latest` 标记（仅最新版本为 `true`）；无评估记录时返回空数组，租赁物不存在返回 `404`。
+
+`GET /api/assets/{assetCode}/assessments/current`
+
+返回该租赁物当前最新评估版本；无评估记录或租赁物不存在返回 `404`。
+
 ### 校验与错误响应
 
 - 租赁物编码、合同编号分别唯一，重复返回 `409`。
@@ -142,6 +188,14 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 - 合同持久化实际采用的还款方式（`repayment_method` 列，枚举字符串）。
 - 租金期次持久化累计已收金额（`paid_amount` 列，初始为 0）；回款记录独立持久化（`rent_payment` 表），流水号 `payment_no` 全局唯一，登记回款时对目标期次加行级悲观锁并在同一事务内写入回款记录、累加已收金额。
 - 回款状态不落库，按 `total_due` 与 `paid_amount` 实时推导：已收为 0 → `UNPAID`，已收小于应还 → `PARTIAL`，已收等于应还 → `PAID`。
+
+### 残值评估
+
+- 残值评估持久化在 `residual_assessment` 表：`assessment_no` 全局唯一，`(asset_id, version)` 唯一约束保证每项租赁物的版本号从 1 开始严格递增、不跳号；记录只新增、不更新、不删除，构成不可变版本链；
+- 登记时对租赁物行加悲观写锁（`SELECT … FOR UPDATE`），串行化同一租赁物的并发评估，唯一约束兜底，确保基于同一当前版本的并发请求只有一个成功，其余返回 `409`；
+- 评估编号幂等：编号与资产、日期、价值、机构完全一致的重复提交返回首次结果；编号复用但内容不一致返回 `409`；
+- 减值金额 = 资产原值 − 评估价值（2 位小数，HALF_UP）；残值率 = 评估价值 ÷ 资产原值（4 位小数，HALF_UP），均随版本持久化并在查询时返回；
+- 登记在单一事务内完成版本校验、业务校验与写入，任一步骤失败整体回滚，不留下跳号版本或不完整记录。
 
 ### 催收任务
 
@@ -195,3 +249,14 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 查询催收任务（可按合同编号、状态筛选）：
 
     curl "http://localhost:8080/api/collection-tasks?contractNo=HT-001&status=OPEN"
+
+登记残值评估（baseVersion 为客户端看到的最新版本，首次评估为 0）：
+
+    curl -X POST http://localhost:8080/api/assets/ASSET-001/assessments \
+      -H "Content-Type: application/json" \
+      -d '{"assessmentNo":"EV-20250601-001","assessmentDate":"2025-06-01","assessedValue":120000.00,"appraiser":"中联评估","baseVersion":0}'
+
+查询评估历史与当前版本：
+
+    curl http://localhost:8080/api/assets/ASSET-001/assessments
+    curl http://localhost:8080/api/assets/ASSET-001/assessments/current
