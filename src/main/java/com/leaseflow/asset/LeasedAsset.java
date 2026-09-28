@@ -2,6 +2,8 @@ package com.leaseflow.asset;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -32,6 +34,10 @@ public class LeasedAsset {
     @Column(name = "original_value", nullable = false, precision = 19, scale = 2)
     private BigDecimal originalValue;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "status", nullable = false, length = 32)
+    private AssetStatus status = AssetStatus.IN_LEASE;
+
     protected LeasedAsset() {
     }
 
@@ -60,5 +66,17 @@ public class LeasedAsset {
 
     public BigDecimal getOriginalValue() {
         return originalValue;
+    }
+
+    public AssetStatus getStatus() {
+        return status;
+    }
+
+    /**
+     * 将资产置为残值已结算。结算为终态：与结算金额、明细在同一事务内提交，
+     * 此后拒绝普通评估，修正只能追加结算更正。
+     */
+    public void markSettled() {
+        this.status = AssetStatus.SETTLED;
     }
 }

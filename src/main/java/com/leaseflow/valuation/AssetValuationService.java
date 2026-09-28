@@ -1,5 +1,6 @@
 package com.leaseflow.valuation;
 
+import com.leaseflow.asset.AssetStatus;
 import com.leaseflow.asset.LeasedAsset;
 import com.leaseflow.asset.LeasedAssetRepository;
 import com.leaseflow.common.exception.BusinessRuleViolationException;
@@ -74,6 +75,14 @@ public class AssetValuationService {
                 return new ValuationRegistrationResult(toView(existing, latest), true);
             }
             throw new DuplicateResourceException("评估编号已被使用且内容不一致: " + valuationNo);
+        }
+
+        // 结算成功后资产为 SETTLED：不再接受普通评估，修正只能走结算更正流程。
+        // 已结算资产的历史评估编号仍可幂等重放（上方分支），这里只拦截“新增”。
+        if (asset.getStatus() == AssetStatus.SETTLED) {
+            throw new BusinessRuleViolationException(
+                    "资产已完成残值结算，不再接受普通评估；如需修正请走结算更正流程: "
+                            + assetCode);
         }
 
         if (request.valuationDate().isBefore(contract.getStartDate())) {

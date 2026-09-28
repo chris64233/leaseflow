@@ -1,6 +1,6 @@
 # LeaseFlow
 
-LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，按等额本金或等额本息方式生成月度租金计划，按合同、期次登记租金回款，并支持按业务日期扫描逾期租金、生成和管理催收任务；此外为每项租赁物维护不可变的残值评估版本链，支持评估登记（乐观版本控制）、评估历史与当前版本查询。
+LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于承载租赁资产、合同租金及其相关业务数据。当前已实现业务功能：创建融资租赁项目，按等额本金或等额本息方式生成月度租金计划，按合同、期次登记租金回款，并支持按业务日期扫描逾期租金、生成和管理催收任务；此外为每项租赁物维护不可变的残值评估版本链，支持评估登记（乐观版本控制）、评估历史与当前版本查询；并在租赁结束后提供残值结算，把最新评估版本、实际处置收入与合同计算规则一次性冻结为最终金额及明细，结算后只允许通过只追加、不覆盖原始依据的更正流程修正。
 
 ## 环境
 
@@ -177,10 +177,101 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 
 返回最新版本视图（`latest` 恒为 `true`）。资产不存在返回 `404`；资产存在但尚无评估返回 `404`。
 
+> 资产完成残值结算（见下节）后进入 `SETTLED` 状态，不再接受**普通评估**：登记新评估返回 `400`，提示改走结算更正流程。历史评估编号的相同内容重试仍按既有幂等规则返回首次结果，评估版本链本身仍不可变。
+
+### 确认残值结算
+
+`POST /api/assets/{assetCode}/residual-settlements`
+
+在租赁结束后，基于**最新评估版本**和**实际处置收入**确认残值结算。结算不是把评估状态改成已完成，而是在同一事务内把计算依据冻结、算出最终金额与明细，并把资产置为 `SETTLED`。请求体：
+
+```json
+{
+  "settlementNo": "STL-20250401-001",
+  "expectedVersion": 2,
+  "disposalIncome": 48000.00,
+  "disposalDate": "2025-04-01",
+  "settlementDate": "2025-04-02",
+  "settlementRuleCode": "RESIDUAL_VS_DISPOSAL"
+}
+```
+
+- `settlementNo`：全局唯一的结算编号；
+- `expectedVersion`：客户端看到的最新评估版本号（取自评估历史/当前版本查询）；
+- `disposalIncome`：实际处置收入，必须大于等于 0，最多保留 2 位小数；
+- `disposalDate`：处置日期，不得早于结算所依据评估的评估日期；
+- `settlementDate`：结算日期，可选，不传取确认当日，且不得早于处置日期；
+- `settlementRuleCode`：本次采用的结算计算规则代码，随合同规则一并冻结。
+
+成功返回 `201`，响应为结算完整视图，包含三类信息：
+
+- **冻结的评估依据**（`valuationBasis`）：所采用最新评估版本的版本号、评估编号、评估日期、评估残值、减值金额、残值率、评估机构，以确认时刻的快照保存，事后评估链变化不影响本结算；
+- **冻结的合同计算规则**（`contractBasis`）：合同编号、起租日、资产原值、融资金额、名义年利率、还款方式（`repaymentMethod`）及结算规则代码 `settlementRuleCode`；
+- **实际处置与最终结果**：`disposalIncome`、`disposalDate`、`settlementDate`，以及最终结算差额与明细。
+
+金额口径（均 2 位小数 HALF_UP，`BigDecimal`）：
+
+- 结算差额 `settlementDiff` = 冻结的评估残值 − 实际处置收入；
+- 差额方向 `diffDirection`：`PAYABLE`（差额 > 0，承租人应补，`payableAmount` 为差额、`refundableAmount` 为 0）、`REFUNDABLE`（差额 < 0，应退承租人，`refundableAmount` 为差额绝对值）、`EVEN`（差额 = 0，结清，两者均为 0）。
+
+明细 `items` 按 `lineNo` 有序展开计算过程，原始结算固定三行：
+
+1. `RESIDUAL_VALUE`（`ADD`）：评估残值，带符号金额为正；
+2. `DISPOSAL_INCOME`（`DEDUCT`）：实际处置收入，带符号金额为负；
+3. `SETTLEMENT_DIFF`（`RESULT`）：结算差额，带符号金额即差额本身；前两行带符号金额之和恰等于该结果。
+
+**冻结与并发互斥**：确认事务先对租赁物行加悲观写锁（与评估登记共用同一把锁 `SELECT … FOR UPDATE`），再读取最新评估版本并比对 `expectedVersion`。因此“登记新评估”与“确认结算”并发时，二者在锁上串行，叠加版本比对，**只有一方能成功**：
+
+- 结算先拿到锁：结算成功并把资产置为 `SETTLED`，后到的普通评估全部被业务规则拒绝（`400`）；
+- 新评估先拿到锁：版本号被推进，基于旧 `expectedVersion` 的结算得到 `409`（错误码 `VERSION_CONFLICT`），需重新查询最新版本后再提交。
+
+资产状态、冻结依据、最终金额、明细在**同一数据库事务**内提交；任一步骤失败整体回滚，不留下结算或明细，资产也不会停留在 `SETTLED`。数据库层 `residual_settlement.asset_id` 唯一约束兜底，保证一个资产至多一笔结算；`settlement_no` 全局唯一。
+
+**幂等**：相同 `settlementNo` 连同相同资产、`expectedVersion`、处置收入、处置日期、规则代码重复提交时视为重试，幂等返回**首次结算结果**（HTTP `200`，响应 `replayed` 为 `true`），不产生新结算或明细；编号复用但任一内容不一致返回 `409`（`DUPLICATE_RESOURCE`）。`settlementDate` 为服务端确认时间，不参与幂等内容比对。已结算资产用**不同**编号再次确认返回 `400`，提示走更正流程。
+
+错误情况：资产不存在 `404`；资产尚无评估、处置日期早于评估日期、结算日期早于处置日期返回 `400`；`expectedVersion` 过期返回 `409`；字段格式校验失败返回 `400` 并在 `errors` 中列出字段原因。
+
+### 追加结算更正
+
+`POST /api/assets/{assetCode}/residual-settlements/corrections`
+
+结算成功后需要修正时，**只能**通过本接口追加更正，不提供覆盖、更新或删除原始结算的入口。请求体：
+
+```json
+{
+  "correctionNo": "COR-20250510-001",
+  "correctionDate": "2025-05-10",
+  "reason": "处置费用与评估口径重估",
+  "adjustedResidualValue": 78000.00,
+  "adjustedDisposalIncome": 72000.00
+}
+```
+
+- `correctionNo`：全局唯一的更正编号；
+- `correctionDate`：更正日期，不得早于结算日期，且必须严格晚于上一笔更正日期；
+- `reason`：更正原因；
+- `adjustedResidualValue` / `adjustedDisposalIncome`：更正后采用的**有效评估残值**与**有效实际处置收入**，取值 [0, 资产原值] / 非负。
+
+服务端按更正后口径重算有效结算差额、方向、应补/应退金额，并记录相对上一有效结果（首笔更正相对原始结算）的影响额（`diffChange`、`payableChange`、`residualValueChange`、`disposalIncomeChange`）。成功返回 `201`，响应仍为该资产的结算完整视图：
+
+- 原始冻结依据（`valuationBasis`、`contractBasis`）与原始结果（`disposalIncome`、`settlementDiff`、`payableAmount` 等）**保持不变**；
+- `corrections` 为按 `seqNo`（从 1 起）升序的只追加更正链；
+- `appliedCorrectionCount` 为已应用更正笔数；
+- `effectiveResidualValue`、`effectiveDisposalIncome`、`effectiveSettlementDiff`、`effectiveDiffDirection`、`effectivePayableAmount`、`effectiveRefundableAmount` 为截至最近一笔更正后的有效金额（无更正时等于原始结果）。
+
+更正同样幂等：相同 `correctionNo` 连同相同更正日期、原因、有效残值、有效收入重试返回首次结果（`200`，`replayed=true`）；编号复用但内容不一致返回 `409`。资产未结算时更正返回 `400`；更正写入与结算有效金额更新在同一事务提交，失败整体回滚。
+
+### 查询残值结算
+
+- `GET /api/assets/{assetCode}/residual-settlements/current`：按资产查询结算完整计算依据（冻结评估、冻结合同规则、原始金额与明细、有效金额、更正链）。资产不存在或尚未结算返回 `404`。
+- `GET /api/residual-settlements/{settlementNo}`：按结算编号查询同一完整视图，结算不存在返回 `404`。
+
 ### 校验与错误响应
 
 - 租赁物编码、合同编号分别唯一，重复返回 `409`。
 - 残值评估编号全局唯一，复用且内容不一致返回 `409`；登记所基于的版本过期或评估日期不晚于最新版本返回 `409`（错误码 `VERSION_CONFLICT`）。
+- 结算编号、更正编号全局唯一，复用且内容不一致返回 `409`；结算所基于的评估版本过期（被并发新评估推进）返回 `409`（`VERSION_CONFLICT`）。
+- 资产完成残值结算后不再接受普通评估，重复结算或对未结算资产发起更正返回 `400`，修正请走只追加的结算更正流程。
 - 原值、融资金额必须大于 0，且融资金额不得超过原值；名义年利率取值 0 到 1（允许为 0）；期数 1 到 120；首期应还日不得早于起租日。参数或业务校验失败返回 `400`。
 - 错误响应统一结构：`code`（错误码）、`message`（消息）、`timestamp`（时间），字段校验失败时附带 `errors`（字段及原因）列表。
 
@@ -224,6 +315,17 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
 - 相同编号、相同资产、日期、价值、机构的重复提交命中幂等分支，返回首次结果；编号复用但内容不一致返回 `409`。
 - 历史查询按版本号升序（同级按 id 升序）稳定排序，每条记录标注 `latest`；当前版本即版本号最大的记录。
 - 业务校验：评估日期不得早于合同起租日；评估价值取值区间为 [0, 资产原值]，边界 0 与原值均合法（分别对应残值率 0 与 1）。
+- 资产完成残值结算后进入 `SETTLED`：普通评估登记被拒绝（`400`）；历史评估编号的相同内容幂等重放仍返回首次结果，评估版本链保持不可变。
+
+## 残值结算规则
+
+- 结算主表 `residual_settlement`：`settlement_no` 全局唯一（`uk_residual_settlement_no`），`asset_id` 唯一（`uk_residual_settlement_asset`，一个资产至多一笔结算）。明细表 `residual_settlement_item` 以 `(settlement_id, line_no)` 唯一约束固定有序明细；更正表 `residual_settlement_correction` 的 `correction_no` 全局唯一、`(settlement_id, seq_no)` 唯一，构成只追加更正链。
+- 确认结算在单个事务内对租赁物行加悲观写锁（与评估登记共用同一把锁），在锁内读取最新评估版本并比对 `expectedVersion`，随后冻结评估依据、合同计算规则、实际处置收入，计算结算差额与明细，并把资产置为 `SETTLED`，最后一起提交。新评估与结算并发时在锁上串行，叠加版本比对只允许一方成功；资产唯一约束兜底。
+- 冻结依据以标量列复制到结算主表（评估版本号/编号/日期/残值/减值/残值率/机构，合同编号/起租日/原值/融资金额/年利率/还款方式/结算规则代码），事后评估链或更正均不回改这些列，因此结算采用的原始依据永不被覆盖。
+- 结算差额 = 评估残值 − 实际处置收入，保留 **2 位小数（HALF_UP）**；方向 `PAYABLE`/`REFUNDABLE`/`EVEN`，应补金额为正差额、应退金额为负差额绝对值，二者互斥，另一者为 0。明细三行（计入评估残值、冲减处置收入、结果差额）的带符号金额满足「计入 + 冲减 = 结果」。
+- 更正只追加：每笔更正保存更正后的有效残值/收入、重算的有效差额/方向/应补应退，以及相对上一有效结果的影响额；原始结算的冻结依据与原始金额不变，主表上的 `effective_*` 字段随最近一笔更正更新。更正日期须晚于结算日期且严格晚于上一笔更正日期。
+- 结算编号与更正编号均支持相同内容重放幂等（分别返回 `200`，`replayed=true`），编号复用且内容不一致返回 `409`。
+- 资产状态、结算金额、明细（及更正与其有效金额）必须在同一事务提交；任一步骤失败整体回滚，不留下部分结算、部分明细或未完成的状态翻转。
 
 ## 常用命令
 
@@ -276,3 +378,21 @@ LeaseFlow 是一个面向融资租赁场景的 Spring Boot 后端项目，用于
     curl http://localhost:8080/api/assets/ASSET-001/valuations
 
     curl http://localhost:8080/api/assets/ASSET-001/valuations/current
+
+基于最新评估版本 2 与实际处置收入确认残值结算：
+
+    curl -X POST http://localhost:8080/api/assets/ASSET-001/residual-settlements \
+      -H "Content-Type: application/json" \
+      -d '{"settlementNo":"STL-20250401-001","expectedVersion":2,"disposalIncome":48000.00,"disposalDate":"2025-04-01","settlementDate":"2025-04-02","settlementRuleCode":"RESIDUAL_VS_DISPOSAL"}'
+
+结算后追加一笔更正（只追加，不覆盖原始冻结依据）：
+
+    curl -X POST http://localhost:8080/api/assets/ASSET-001/residual-settlements/corrections \
+      -H "Content-Type: application/json" \
+      -d '{"correctionNo":"COR-20250510-001","correctionDate":"2025-05-10","reason":"处置费用与评估口径重估","adjustedResidualValue":52000.00,"adjustedDisposalIncome":49000.00}'
+
+查询结算完整计算依据（按资产或按结算编号）：
+
+    curl http://localhost:8080/api/assets/ASSET-001/residual-settlements/current
+
+    curl http://localhost:8080/api/residual-settlements/STL-20250401-001
