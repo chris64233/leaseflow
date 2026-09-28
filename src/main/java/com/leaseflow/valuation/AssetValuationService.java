@@ -1,5 +1,6 @@
 package com.leaseflow.valuation;
 
+import com.leaseflow.asset.AssetStatus;
 import com.leaseflow.asset.LeasedAsset;
 import com.leaseflow.asset.LeasedAssetRepository;
 import com.leaseflow.common.exception.BusinessRuleViolationException;
@@ -51,10 +52,7 @@ public class AssetValuationService {
      */
     @Transactional
     public ValuationRegistrationResult register(String assetCode, RegisterValuationRequest request) {
-        LeasedAsset asset = assetRepository.findByAssetCode(assetCode)
-                .orElseThrow(() -> new ResourceNotFoundException("租赁物不存在: " + assetCode));
-        // 锁定资产行：同一资产的并发评估在此串行，后到者将基于新版本重新判定。
-        asset = assetRepository.findByIdForUpdate(asset.getId())
+        LeasedAsset asset = assetRepository.findByAssetCodeForUpdate(assetCode)
                 .orElseThrow(() -> new ResourceNotFoundException("租赁物不存在: " + assetCode));
         LeaseContract contract = contractRepository.findByAssetId(asset.getId())
                 .orElseThrow(() -> new ResourceNotFoundException(
@@ -74,6 +72,14 @@ public class AssetValuationService {
                 return new ValuationRegistrationResult(toView(existing, latest), true);
             }
             throw new DuplicateResourceException("评估编号已被使用且内容不一致: " + valuationNo);
+        }
+
+        if (asset.getStatus() == AssetStatus.SETTLED) {
+            // 结算后评估版本链冻结：不再接受普通评估，修正只能走结算更正流程，
+            // 且更正不会覆盖结算所采用的原始评估依据。
+            throw new BusinessRuleViolationException(
+                    "资产残值已完成结算，不再接受普通评估；如需修正请走结算更正流程: "
+                            + assetCode);
         }
 
         if (request.valuationDate().isBefore(contract.getStartDate())) {

@@ -15,10 +15,11 @@ public interface LeasedAssetRepository extends JpaRepository<LeasedAsset, Long> 
     Optional<LeasedAsset> findByAssetCode(String assetCode);
 
     /**
-     * 对租赁物行加悲观写锁，串行化同一资产的并发评估登记：
-     * 后到事务在锁内重新读取最新版本，基于旧版本的请求将得到 409。
+     * 对租赁物行加悲观写锁，串行化同一资产上的并发操作：
+     * 残值评估登记与残值结算确认共用此锁，因此新评估与结算并发时只有一方能基于
+     * 其进入锁时看到的最新状态成功，另一方在锁内重新判定后得到 409。
      */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("select asset from LeasedAsset asset where asset.id = :assetId")
-    Optional<LeasedAsset> findByIdForUpdate(@Param("assetId") Long assetId);
+    @Query("select asset from LeasedAsset asset where asset.assetCode = :assetCode")
+    Optional<LeasedAsset> findByAssetCodeForUpdate(@Param("assetCode") String assetCode);
 }
